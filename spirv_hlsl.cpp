@@ -769,6 +769,10 @@ void CompilerHLSL::emit_builtin_inputs_in_struct()
 		auto builtin = static_cast<BuiltIn>(i);
 		switch (builtin)
 		{
+		case BuiltInPosition:
+			type = "float4";
+			semantic = legacy ? "POSITION" : "SV_Position";
+			break;
 		case BuiltInFragCoord:
 			type = "float4";
 			semantic = legacy ? "VPOS" : "SV_Position";
@@ -1164,6 +1168,9 @@ std::string CompilerHLSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
 {
 	switch (builtin)
 	{
+	case BuiltInPosition:
+		// We want to avoid clash between input/output for geometry shader
+		return storage == StorageClass::StorageClassInput ? "gl_PositionIn" : "gl_Position";
 	case BuiltInVertexId:
 		return "gl_VertexID";
 	case BuiltInInstanceId:
@@ -1247,9 +1254,7 @@ void CompilerHLSL::emit_builtin_variables()
 
 	// Emit global variables for the interface variables which are statically used by the shader.
 	builtins.for_each_bit([&](uint32_t i) {
-		const char *type = nullptr;
 		auto builtin = static_cast<BuiltIn>(i);
-		uint32_t array_size = 0;
 
 		string init_expr;
 		auto init_itr = builtin_to_initializer.find(builtin);
@@ -1268,147 +1273,163 @@ void CompilerHLSL::emit_builtin_variables()
 			}
 		}
 
-		switch (builtin)
+		// If we need to emit 2 separate variables (for both input & output), we'll update this value
+		bool has_separate_input_output = false;
+		for (int variableIndex = 0; variableIndex < (has_separate_input_output ? 2 : 1); ++variableIndex)
 		{
-		case BuiltInFragCoord:
-		case BuiltInPosition:
-			type = "float4";
-			break;
-
-		case BuiltInFragDepth:
-			type = "float";
-			break;
-
-		case BuiltInVertexId:
-		case BuiltInVertexIndex:
-		case BuiltInInstanceIndex:
-			type = "int";
-			if (hlsl_options.support_nonzero_base_vertex_base_instance || hlsl_options.shader_model >= 68)
-				base_vertex_info.used = true;
-			break;
-
-		case BuiltInBaseVertex:
-		case BuiltInBaseInstance:
-			type = "int";
-			base_vertex_info.used = true;
-			break;
-
-		case BuiltInInstanceId:
-		case BuiltInSampleId:
-			type = "int";
-			break;
-
-		case BuiltInPointSize:
-			if (hlsl_options.point_size_compat || hlsl_options.shader_model <= 30)
+			uint32_t array_size = 0;
+			StorageClass storage = active_input_builtins.get(i) && variableIndex == 0
+				? StorageClassInput
+				: StorageClassOutput;
+			const char *type = nullptr;
+			switch (builtin)
 			{
-				// Just emit the global variable, it will be ignored.
+			case BuiltInFragCoord:
+				type = "float4";
+				break;
+
+			case BuiltInPosition:
+				type = "float4";
+				if (storage == StorageClass::StorageClassInput &&
+				    (get_execution_model() == ExecutionModelGeometry ||
+				        get_execution_model() == ExecutionModelTessellationControl))
+					array_size = input_vertices_from_execution_mode(get_entry_point());
+				break;
+
+			case BuiltInFragDepth:
 				type = "float";
 				break;
-			}
-			else
+
+			case BuiltInVertexId:
+			case BuiltInVertexIndex:
+			case BuiltInInstanceIndex:
+				type = "int";
+				if (hlsl_options.support_nonzero_base_vertex_base_instance || hlsl_options.shader_model >= 68)
+					base_vertex_info.used = true;
+				break;
+
+			case BuiltInBaseVertex:
+			case BuiltInBaseInstance:
+				type = "int";
+				base_vertex_info.used = true;
+				break;
+
+			case BuiltInInstanceId:
+			case BuiltInSampleId:
+				type = "int";
+				break;
+
+			case BuiltInPointSize:
+				if (hlsl_options.point_size_compat || hlsl_options.shader_model <= 30)
+				{
+					// Just emit the global variable, it will be ignored.
+					type = "float";
+					break;
+				}
+				else
+					SPIRV_CROSS_THROW(join("Unsupported builtin in HLSL: ", unsigned(builtin)));
+
+			case BuiltInGlobalInvocationId:
+			case BuiltInLocalInvocationId:
+			case BuiltInWorkgroupId:
+				type = "uint3";
+				break;
+
+			case BuiltInLocalInvocationIndex:
+				type = "uint";
+				break;
+
+			case BuiltInFrontFacing:
+				type = "bool";
+				break;
+
+			case BuiltInNumWorkgroups:
+			case BuiltInPointCoord:
+				// Handled specially.
+				break;
+
+			case BuiltInSubgroupLocalInvocationId:
+			case BuiltInSubgroupSize:
+				if (hlsl_options.shader_model < 60)
+					SPIRV_CROSS_THROW("Need SM 6.0 for Wave ops.");
+				break;
+
+			case BuiltInSubgroupEqMask:
+			case BuiltInSubgroupLtMask:
+			case BuiltInSubgroupLeMask:
+			case BuiltInSubgroupGtMask:
+			case BuiltInSubgroupGeMask:
+				if (hlsl_options.shader_model < 60)
+					SPIRV_CROSS_THROW("Need SM 6.0 for Wave ops.");
+				type = "uint4";
+				break;
+
+			case BuiltInHelperInvocation:
+				if (hlsl_options.shader_model < 50)
+					SPIRV_CROSS_THROW("Need SM 5.0 for Helper Invocation.");
+				break;
+
+			case BuiltInClipDistance:
+				array_size = clip_distance_count;
+				type = "float";
+				break;
+
+			case BuiltInCullDistance:
+				array_size = cull_distance_count;
+				type = "float";
+				break;
+
+			case BuiltInSampleMask:
+				if (storage == StorageClass::StorageClassInput)
+					type = sample_mask_in_basetype == SPIRType::UInt ? "uint" : "int";
+				else
+					type = sample_mask_out_basetype == SPIRType::UInt ? "uint" : "int";
+				array_size = 1;
+				break;
+
+			case BuiltInPrimitiveId:
+			case BuiltInViewIndex:
+			case BuiltInLayer:
+				type = "uint";
+				break;
+
+			case BuiltInViewportIndex:
+			case BuiltInPrimitiveShadingRateKHR:
+			case BuiltInPrimitiveLineIndicesEXT:
+			case BuiltInCullPrimitiveEXT:
+				type = "uint";
+				break;
+
+			case BuiltInBaryCoordKHR:
+			case BuiltInBaryCoordNoPerspKHR:
+				if (hlsl_options.shader_model < 61)
+					SPIRV_CROSS_THROW("Need SM 6.1 for barycentrics.");
+				type = "float3";
+				break;
+
+			default:
 				SPIRV_CROSS_THROW(join("Unsupported builtin in HLSL: ", unsigned(builtin)));
+			}
 
-		case BuiltInGlobalInvocationId:
-		case BuiltInLocalInvocationId:
-		case BuiltInWorkgroupId:
-			type = "uint3";
-			break;
+			if (type)
+			{
+				auto builtin_name = builtin_to_glsl(builtin, storage);
+				if (array_size)
+					statement("static ", type, " ", builtin_name, "[", array_size, "]", init_expr, ";");
+				else
+					statement("static ", type, " ", builtin_name, init_expr, ";");
 
-		case BuiltInLocalInvocationIndex:
-			type = "uint";
-			break;
-
-		case BuiltInFrontFacing:
-			type = "bool";
-			break;
-
-		case BuiltInNumWorkgroups:
-		case BuiltInPointCoord:
-			// Handled specially.
-			break;
-
-		case BuiltInSubgroupLocalInvocationId:
-		case BuiltInSubgroupSize:
-			if (hlsl_options.shader_model < 60)
-				SPIRV_CROSS_THROW("Need SM 6.0 for Wave ops.");
-			break;
-
-		case BuiltInSubgroupEqMask:
-		case BuiltInSubgroupLtMask:
-		case BuiltInSubgroupLeMask:
-		case BuiltInSubgroupGtMask:
-		case BuiltInSubgroupGeMask:
-			if (hlsl_options.shader_model < 60)
-				SPIRV_CROSS_THROW("Need SM 6.0 for Wave ops.");
-			type = "uint4";
-			break;
-
-		case BuiltInHelperInvocation:
-			if (hlsl_options.shader_model < 50)
-				SPIRV_CROSS_THROW("Need SM 5.0 for Helper Invocation.");
-			break;
-
-		case BuiltInClipDistance:
-			array_size = clip_distance_count;
-			type = "float";
-			break;
-
-		case BuiltInCullDistance:
-			array_size = cull_distance_count;
-			type = "float";
-			break;
-
-		case BuiltInSampleMask:
-			if (active_input_builtins.get(BuiltInSampleMask))
-				type = sample_mask_in_basetype == SPIRType::UInt ? "uint" : "int";
-			else
-				type = sample_mask_out_basetype == SPIRType::UInt ? "uint" : "int";
-			array_size = 1;
-			break;
-
-		case BuiltInPrimitiveId:
-		case BuiltInViewIndex:
-		case BuiltInLayer:
-			type = "uint";
-			break;
-
-		case BuiltInViewportIndex:
-		case BuiltInPrimitiveShadingRateKHR:
-		case BuiltInPrimitiveLineIndicesEXT:
-		case BuiltInCullPrimitiveEXT:
-			type = "uint";
-			break;
-
-		case BuiltInBaryCoordKHR:
-		case BuiltInBaryCoordNoPerspKHR:
-			if (hlsl_options.shader_model < 61)
-				SPIRV_CROSS_THROW("Need SM 6.1 for barycentrics.");
-			type = "float3";
-			break;
-
-		default:
-			SPIRV_CROSS_THROW(join("Unsupported builtin in HLSL: ", unsigned(builtin)));
-		}
-
-		StorageClass storage = active_input_builtins.get(i) ? StorageClassInput : StorageClassOutput;
-
-		if (type)
-		{
-			if (array_size)
-				statement("static ", type, " ", builtin_to_glsl(builtin, storage), "[", array_size, "]", init_expr, ";");
-			else
-				statement("static ", type, " ", builtin_to_glsl(builtin, storage), init_expr, ";");
-		}
-
-		// SampleMask can be both in and out with sample builtin, in this case we have already
-		// declared the input variable and we need to add the output one now.
-		if (builtin == BuiltInSampleMask && storage == StorageClassInput && this->active_output_builtins.get(i))
-		{
-			type = sample_mask_out_basetype == SPIRType::UInt ? "uint" : "int";
-			if (array_size)
-				statement("static ", type, " ", this->builtin_to_glsl(builtin, StorageClassOutput), "[", array_size, "]", init_expr, ";");
-			else
-				statement("static ", type, " ", this->builtin_to_glsl(builtin, StorageClassOutput), init_expr, ";");
+				if (storage == StorageClassInput && this->active_output_builtins.get(i))
+				{
+					auto out_builtin_name = builtin_to_glsl(builtin, StorageClassOutput);
+					if (out_builtin_name != builtin_name)
+					{
+						// If built-in name differs, we need to output it again
+						// (we reevaluate type and array size in case they are different)
+						has_separate_input_output = true;
+					}
+				}
+			}
 		}
 	});
 
@@ -3351,6 +3372,17 @@ void CompilerHLSL::emit_hlsl_entry_point()
 		auto builtin = builtin_to_glsl(static_cast<BuiltIn>(i), StorageClassInput);
 		switch (static_cast<BuiltIn>(i))
 		{
+		case BuiltInPosition:
+			if (execution.model == ExecutionModelGeometry)
+			{
+				statement("for (int i = 0; i < ", input_vertices, "; i++)");
+				begin_scope();
+				statement(builtin, "[i] = stage_input[i].", builtin, ";");
+				end_scope();
+			}
+			else
+				statement(builtin, " = stage_input.", builtin, ";");
+			break;
 		case BuiltInFragCoord:
 			// VPOS in D3D9 is sampled at integer locations, apply half-pixel offset to be consistent.
 			// TODO: Do we need an option here? Any reason why a D3D9 shader would be used
