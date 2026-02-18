@@ -787,8 +787,27 @@ void CompilerHLSL::emit_builtin_inputs_in_struct()
 			break;
 
 		case BuiltInPrimitiveId:
-			type = "uint";
-			semantic = "SV_PrimitiveID";
+			// For geometry shaders, PrimitiveId is a direct function parameter
+			// (SV_PrimitiveID), not part of the input struct.
+			if (get_entry_point().model != ExecutionModelGeometry)
+			{
+				type = "uint";
+				semantic = "SV_PrimitiveID";
+			}
+			break;
+
+		case BuiltInInvocationId:
+			if (get_entry_point().model == ExecutionModelGeometry)
+			{
+				type = "uint";
+				semantic = "SV_GSInstanceID";
+			}
+			else if (get_entry_point().model != ExecutionModelTessellationControl)
+			{
+				// For tesc, InvocationId is a direct function parameter (SV_OutputControlPointID),
+				// not part of the input struct.
+				SPIRV_CROSS_THROW("InvocationId is only supported in geometry and tessellation control shaders.");
+			}
 			break;
 
 		case BuiltInInstanceId:
@@ -3270,6 +3289,8 @@ void CompilerHLSL::emit_hlsl_entry_point()
 
 		statement("[maxvertexcount(", execution.output_vertices, ")]");
 		arguments.push_back(join(prim, " SPIRV_Cross_Input stage_input[", input_vertices, "]"));
+		if (active_input_builtins.get(BuiltInPrimitiveId))
+			arguments.push_back("uint gl_PrimitiveID : SV_PrimitiveID");
 		arguments.push_back(join("inout ", stream_type, "<SPIRV_Cross_Output> ", "geometry_stream"));
 		break;
 	}
@@ -3450,6 +3471,30 @@ void CompilerHLSL::emit_hlsl_entry_point()
 		case BuiltInSubgroupSize:
 		case BuiltInSubgroupLocalInvocationId:
 		case BuiltInHelperInvocation:
+			break;
+
+		case BuiltInPrimitiveId:
+			if (execution.model == ExecutionModelGeometry)
+			{
+				// PrimitiveId is a separate function parameter for GS.
+				// The global is named gl_PrimitiveIDIn (GLSL convention).
+				statement(builtin, " = gl_PrimitiveID;");
+			}
+			else
+				statement(builtin, " = stage_input.", builtin, ";");
+			break;
+
+		case BuiltInInvocationId:
+			if (execution.model == ExecutionModelTessellationControl)
+			{
+				// Copy from function parameter to global.
+				statement(builtin, " = uCPID;");
+			}
+			else
+			{
+				// For geometry shaders, copy from struct as usual.
+				statement(builtin, " = stage_input[0].", builtin, ";");
+			}
 			break;
 
 		case BuiltInSubgroupEqMask:
