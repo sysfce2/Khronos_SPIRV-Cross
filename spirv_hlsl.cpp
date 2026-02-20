@@ -1162,8 +1162,9 @@ void CompilerHLSL::emit_interface_block_in_struct(const SPIRVariable &var, unord
 			    (execution.model == ExecutionModelGeometry && var.storage == StorageClassInput) ||
 			    has_decoration(var.self, DecorationPerVertexKHR))
 			{
-				decl_type.array.erase(decl_type.array.begin());
-				decl_type.array_size_literal.erase(decl_type.array_size_literal.begin());
+				// The per-vertex/per-CP dimension is the outermost (last element in array vector).
+				decl_type.array.pop_back();
+				decl_type.array_size_literal.pop_back();
 			}
 			statement(to_interpolation_qualifiers(get_decoration_bitset(var.self)), variable_decl(decl_type, name), " : ",
 			          semantic, ";");
