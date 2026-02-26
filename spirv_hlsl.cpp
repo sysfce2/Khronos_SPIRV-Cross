@@ -1295,10 +1295,10 @@ void CompilerHLSL::emit_builtin_variables()
 
 		// If we need to emit 2 separate variables (for both input & output), we'll update this value
 		bool has_separate_input_output = false;
-		for (int variableIndex = 0; variableIndex < (has_separate_input_output ? 2 : 1); ++variableIndex)
+		for (int variable_index = 0; variable_index < (has_separate_input_output ? 2 : 1); variable_index++)
 		{
 			uint32_t array_size = 0;
-			StorageClass storage = active_input_builtins.get(i) && variableIndex == 0
+			StorageClass storage = active_input_builtins.get(i) && variable_index == 0
 				? StorageClassInput
 				: StorageClassOutput;
 			const char *type = nullptr;
